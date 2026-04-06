@@ -1,0 +1,127 @@
+name: 🖥️ Windows VPS - Tailscale + noVNC
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+env:
+  TAILSCALE_AUTH_KEY: tskey-auth-kN15hVdZyD11CNTRL-xxui6m8VFYJE9cpQs5EPYJLP7baA6y4h4
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: 📡 Enable RDP
+        run: |
+          Write-Host "Enabling RDP..." -ForegroundColor Cyan
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          
+      - name: 🔐 Set User Password
+        run: |
+          Write-Host "Setting password..." -ForegroundColor Cyan
+          $password = ConvertTo-SecureString "VPS@123456" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $password
+          Write-Host "Password set to: VPS@123456" -ForegroundColor Green
+          
+      - name: 🔗 Install & Connect Tailscale
+        run: |
+          Write-Host "Installing Tailscale..." -ForegroundColor Cyan
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi -UseBasicParsing
+          Start-Process msiexec -ArgumentList "/i $msi /quiet /norestart" -Wait
+          Start-Sleep -Seconds 10
+          
+          Write-Host "Connecting to Tailscale network..." -ForegroundColor Cyan
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$env:TAILSCALE_AUTH_KEY" --hostname="vps-windows" --accept-routes
+          Start-Sleep -Seconds 10
+          
+          $tailscaleIp = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$tailscaleIp" >> $env:GITHUB_ENV
+          Write-Host "✅ Tailscale IP: $tailscaleIp" -ForegroundColor Green
+          
+      - name: 🖥️ Install TightVNC
+        run: |
+          Write-Host "Installing TightVNC..." -ForegroundColor Cyan
+          $vncInstaller = "$env:TEMP\tightvnc.msi"
+          Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-64bit.msi" -OutFile $vncInstaller -UseBasicParsing
+          Start-Process msiexec -ArgumentList "/i $vncInstaller /quiet /norestart" -Wait
+          Start-Sleep -Seconds 5
+          
+          Write-Host "Configuring TightVNC..." -ForegroundColor Cyan
+          $regPath = "HKLM:\SOFTWARE\TightVNC\Server"
+          New-Item -Path $regPath -Force | Out-Null
+          Set-ItemProperty -Path $regPath -Name "ControlPassword" -Value "VPS@123456"
+          Set-ItemProperty -Path $regPath -Name "UseVncAuthentication" -Value 1
+          Set-ItemProperty -Path $regPath -Name "AcceptRfbConnections" -Value 1
+          
+          netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
+          Start-Service tvnserver -ErrorAction SilentlyContinue
+          Set-Service tvnserver -StartupType Automatic
+          Write-Host "✅ TightVNC ready on port 5900" -ForegroundColor Green
+          
+      - name: 🌐 Install noVNC
+        run: |
+          Write-Host "Installing noVNC..." -ForegroundColor Cyan
+          Remove-Item C:\novnc -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item C:\novnc -ItemType Directory -Force | Out-Null
+          Set-Location C:\novnc
+          
+          Invoke-WebRequest -Uri "https://codeload.github.com/novnc/noVNC/zip/refs/tags/v1.4.0" -OutFile "novnc.zip" -UseBasicParsing
+          Invoke-WebRequest -Uri "https://codeload.github.com/novnc/websockify/zip/refs/tags/v0.11.0" -OutFile "ws.zip" -UseBasicParsing
+          
+          Expand-Archive -Path "novnc.zip" -DestinationPath "." -Force
+          Expand-Archive -Path "ws.zip" -DestinationPath "." -Force
+          
+          $novncFolder = Get-ChildItem -Directory | Where-Object { $_.Name -like "noVNC-*" } | Select-Object -First 1
+          $wsFolder = Get-ChildItem -Directory | Where-Object { $_.Name -like "websockify-*" } | Select-Object -First 1
+          
+          Get-ChildItem "$($novncFolder.FullName)" | Copy-Item -Destination "C:\novnc\" -Recurse -Force
+          New-Item "C:\novnc\websockify" -ItemType Directory -Force | Out-Null
+          Get-ChildItem "$($wsFolder.FullName)" | Copy-Item -Destination "C:\novnc\websockify\" -Recurse -Force
+          
+          Remove-Item "*.zip" -Force
+          Remove-Item $novncFolder.FullName -Recurse -Force
+          Remove-Item $wsFolder.FullName -Recurse -Force
+          
+          netsh advfirewall firewall add rule name="noVNC" dir=in action=allow protocol=TCP localport=6080
+          Write-Host "✅ noVNC installed" -ForegroundColor Green
+          
+      - name: 🚀 Start noVNC
+        run: |
+          Write-Host "Starting noVNC service..." -ForegroundColor Cyan
+          Set-Location C:\novnc
+          Start-Process powershell -ArgumentList "-Command python -m http.server 6080" -WindowStyle Hidden
+          Write-Host "✅ noVNC started on port 6080" -ForegroundColor Green
+          
+      - name: 📝 Display Connection Info
+        run: |
+          Write-Host ""
+          Write-Host "============================================================" -ForegroundColor Green
+          Write-Host "              🖥️ WINDOWS VPS READY" -ForegroundColor Green
+          Write-Host "============================================================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "🔗 TAILSCALE CONNECTION:" -ForegroundColor Cyan
+          Write-Host "   IP Address: $env:TAILSCALE_IP" -ForegroundColor Yellow
+          Write-Host "   Protocol: RDP (port 3389)" -ForegroundColor Yellow
+          Write-Host "   Username: runneradmin" -ForegroundColor Yellow
+          Write-Host "   Password: VPS@123456" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "🌐 noVNC CONNECTION:" -ForegroundColor Cyan
+          Write-Host "   URL: http://localhost:6080" -ForegroundColor Yellow
+          Write-Host "   Password: VPS@123456" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "============================================================" -ForegroundColor Green
+          
+      - name: ⏳ Keep Alive
+        run: |
+          $endTime = (Get-Date).AddHours(6)
+          while ((Get-Date) -lt $endTime) {
+            $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes)
+            Write-Host "✅ VPS Running - $remaining minutes remaining" -ForegroundColor Green
+            Write-Host "🔗 Tailscale IP: $env:TAILSCALE_IP" -ForegroundColor Cyan
+            Start-Sleep -Seconds 60
+          }
